@@ -1,0 +1,210 @@
+name: TWRP Device Tree Generator & Pusher
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_url:
+        description: 'Direct download URL to boot.img, vendor_boot.img, or recovery.img'
+        required: true
+        type: string
+      device_brand:
+        description: 'Device OEM Brand (e.g., oppo, realme, oneplus)'
+        required: true
+        default: 'oppo'
+        type: string
+      device_codename:
+        description: 'Device Codename (e.g., findx6, lemon_p)'
+        required: true
+        default: 'unknown'
+        type: string
+      github_username:
+        description: 'Your GitHub Username/Organization'
+        required: true
+        type: string
+      target_repo:
+        description: 'Target Repository Name (e.g., android_device_oppo_findx6)'
+        required: true
+        type: string
+      target_branch:
+        description: 'Branch to push to (e.g., twrp-12.1, twrp-14)'
+        required: true
+        default: 'main'
+        type: string
+
+jobs:
+  generate-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code Generator Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install Dependencies & MagiskBoot
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget curl coreutils zip unzip git
+        
+        # Download static compiled magiskboot
+        mkdir -p $HOME/.local/bin
+        curl -sL "https://github.com" -o $HOME/.local/bin/magiskboot
+        chmod +x $HOME/.local/bin/magiskboot
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Download Target Image
+      run: |
+        echo "[+] Downloading image from: ${{ github.event.inputs.image_url }}"
+        curl -L "${{ github.event.inputs.image_url }}" -o target_image.img
+        
+        if [ ! -s target_image.img ]; then
+          echo "[-] Error: Downloaded file is empty or link is invalid."
+          exit 1
+        fi
+
+    - name: Write Generator Engine Script
+      run: |
+        cat << 'EOF' > generator.py
+        import os
+        import re
+        import subprocess
+        import shutil
+        import sys
+
+        class TWRPTreeGenerator:
+            def __init__(self, image_path, brand, codename):
+                self.image_path = image_path
+                self.brand = brand.lower()
+                self.codename = codename.lower()
+                self.output_dir = "output_tree"  # Keep flat for direct repo committing
+                self.props = {}
+                
+            def unpack_image(self):
+                print(f"[+] Unpacking {self.image_path} using magiskboot...")
+                if not shutil.which("magiskboot"):
+                    return False
+                
+                os.makedirs("work_dir", exist_ok=True)
+                shutil.copy(self.image_path, "work_dir/boot.img")
+                
+                result = subprocess.run(["magiskboot", "unpack", "boot.img"], cwd="work_dir", capture_output=True, text=True)
+                return os.path.exists("work_dir/header")
+
+            def parse_kernel_info(self):
+                header_file = "work_dir/header"
+                if not os.path.exists(header_file):
+                    self.props['cmdline'] = "bootdevice=soc/11120000.msdc loop.max_part=7"
+                    self.props['pagesize'] = "4096"
+                    return
+
+                with open(header_file, "r", errors='ignore') as f:
+                    content = f.read()
+                    
+                cmdline_match = re.search(r'cmdline=(.*)', content)
+                pagesize_match = re.search(r'page_size=(.*)', content)
+                
+                self.props['cmdline'] = cmdline_match.group(1).strip() if cmdline_match else ""
+                self.props['pagesize'] = pagesize_match.group(1).strip() if pagesize_match else "4096"
+
+            def create_structure(self):
+                os.makedirs(self.output_dir, exist_ok=True)
+                os.makedirs(f"{self.output_dir}/recovery/root", exist_ok=True)
+
+            def write_configs(self):
+                board_content = f"""# Auto-generated TWRP Tree Setup
+DEVICE_PATH := device/{self.brand}/{self.codename}
+
+# Architecture Configs
+TARGET_ARCH := arm64
+TARGET_ARCH_VARIANT := armv8-a
+TARGET_CPU_ABI := arm64-v8a
+TARGET_2ND_ARCH := arm
+TARGET_2ND_ARCH_VARIANT := armv7-a-neon
+TARGET_2ND_CPU_ABI := armeabi-v7a
+
+# Kernel Context (Extracted)
+BOARD_KERNEL_CMDLINE := {self.props.get('cmdline', '')}
+BOARD_KERNEL_PAGESIZE := {self.props.get('pagesize', '4096')}
+BOARD_BOOT_HEADER_VERSION := 4
+
+# Recovery Variables
+TW_THEME := portrait_hdpi
+TW_EXTRA_LANGUAGES := true
+TW_INCLUDE_CRYPTO := true
+BOARD_HAS_LARGE_FILESYSTEM := true
+RECOVERY_SDCARD_ON_DATA := true
+TARGET_BOARD_PLATFORM := gki
+"""
+                with open(f"{self.output_dir}/BoardConfig.mk", "w") as f: f.write(board_content)
+
+                with open(f"{self.output_dir}/AndroidProducts.mk", "w") as f:
+                    f.write(f"PRODUCT_MAKEFILES := $(LOCAL_DIR)/omni_{self.codename}.mk\n")
+
+                omni_content = f"""$(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
+$(call inherit-product, $(SRC_TARGET_DIR)/product/full_base_telephony.mk)
+$(call inherit-product, $(SRC_TARGET_DIR)/product/twres_common.mk)
+$(call inherit-product, device/{self.brand}/{self.codename}/device.mk)
+
+PRODUCT_DEVICE := {self.codename}
+PRODUCT_NAME := omni_{self.codename}
+PRODUCT_BRAND := {self.brand.upper()}
+PRODUCT_MODEL := {self.codename.upper()}
+PRODUCT_MANUFACTURER := {self.brand}
+"""
+                with open(f"{self.output_dir}/omni_{self.codename}.mk", "w") as f: f.write(omni_content)
+
+                with open(f"{self.output_dir}/device.mk", "w") as f:
+                    f.write("$(call inherit-product, $(SRC_TARGET_DIR)/product/virtual_ab_ota.mk)\n")
+
+            def generate(self):
+                if self.unpack_image():
+                    self.parse_kernel_info()
+                self.create_structure()
+                self.write_configs()
+
+        if __name__ == "__main__":
+            gen = TWRPTreeGenerator("target_image.img", sys.argv[1], sys.argv[2])
+            gen.generate()
+        EOF
+
+    - name: Run Extraction & Tree Generation
+      run: |
+        python3 generator.py "${{ github.event.inputs.device_brand }}" "${{ github.event.inputs.device_codename }}"
+
+    - name: Clone and Update Device Tree Repository
+      env:
+        # Uses the default GitHub Actions token. For external repos, replace GITHUB_TOKEN with your custom PAT secret if needed.
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+      run: |
+        # Set up git configurations
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@://github.com"
+        
+        # Clone the empty target repository
+        REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@://github.com{{ github.event.inputs.github_username }}/${{ github.event.inputs.target_repo }}.git"
+        echo "[+] Cloning destination repository..."
+        git clone $REPO_URL target_repo_dir || mkdir target_repo_dir
+        
+        cd target_repo_dir
+        if [ ! -d ".git" ]; then
+          git init
+          git checkout -b ${{ github.event.inputs.target_branch }}
+        else
+          git checkout ${{ github.event.inputs.target_branch }} || git checkout -b ${{ github.event.inputs.target_branch }}
+        fi
+        
+        # Move generated device tree components into the repository folder
+        cp -r ../output_tree/* .
+        
+        # Stage, Commit and Push changes
+        git add .
+        if git diff-index --quiet HEAD --; then
+          echo "[!] No changes detected. Tree is already up-to-date."
+        else
+          git commit -m "Auto-generated TWRP device tree for ${{ github.event.inputs.device_codename }} [Skip CI]"
+          git push $REPO_URL ${{ github.event.inputs.target_branch }} --force
+          echo "[+] Successfully pushed device tree to repository!"
+        fi
