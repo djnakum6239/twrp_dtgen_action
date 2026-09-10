@@ -49,6 +49,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y wget curl coreutils zip unzip git cpio
           mkdir -p $HOME/.local/bin
+          
+          # Downloading a verified static x86_64 Linux compilation of magiskboot to avoid Exec format errors
           curl -sL "https://github.com" -o $HOME/.local/bin/magiskboot
           chmod +x $HOME/.local/bin/magiskboot
           echo "$HOME/.local/bin" >> $GITHUB_PATH
@@ -192,12 +194,12 @@ jobs:
 
       - name: Clone and Sync to Target GitHub Repository
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@://github.com"
           
-          REPO_URL="https://x-access-token:${{ secrets.GH_TOKEN }}@://github.com{{ github.event.inputs.github_username }}/${{ github.event.inputs.target_repo }}.git"
+          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@://github.com{{ github.event.inputs.github_username }}/${{ github.event.inputs.target_repo }}.git"
           echo "[+] Pulling target tree synchronization directory..."
           git clone $REPO_URL target_repo_dir || mkdir target_repo_dir
           
