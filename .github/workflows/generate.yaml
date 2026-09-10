@@ -66,12 +66,11 @@ jobs:
           import shutil
           import sys
 
-          brand = "${{ github.event.inputs.device_brand }}".lower()
-          codename = "${{ github.event.inputs.device_codename }}".lower()
+          brand = "${{ github.event.inputs.device_brand }}".lower().strip()
+          codename = "${{ github.event.inputs.device_codename }}".lower().strip()
           image_path = "target_image.img"
           output_dir = f"output_tree/device/{brand}/{codename}"
           
-          # Default fallbacks for dynamic modern Oppo configurations
           props = {
               'cmdline': "bootdevice=soc/11120000.msdc loop.max_part=7 androidboot.selinux=permissive",
               'pagesize': "4096"
@@ -80,30 +79,21 @@ jobs:
           print(f"[+] Processing {image_path} via pure python scanning...")
           os.makedirs("work_dir", exist_ok=True)
 
-          # Deep-scan target image headers directly to pull command line context maps
           try:
               with open(image_path, "rb") as img:
-                  raw_bytes = img.read(16384) # Read initial header block safely
-                  
-                  # Look for dynamic android boot command line strings matching common patterns
+                  raw_bytes = img.read(16384)
                   cmdline_finds = re.findall(b"bootdevice=[a-zA-Z0-9./_-]+", raw_bytes)
                   if cmdline_finds:
-                      # If found, construct clean command string baseline
-                      props['cmdline'] = cmdline_finds[0].decode('utf-8', errors='ignore') + " loop.max_part=7"
-                  
-                  # Detect Android GKI header types standard for Android 13-17
+                      props['cmdline'] = cmdline_finds.decode('utf-8', errors='ignore') + " loop.max_part=7"
                   if b"ANDROID!" in raw_bytes:
                       print("[+] Standard Android OS structural header signature identified.")
           except Exception as e:
               print(f"[!] Header scan completed with notice: {e}")
 
-          # Enforce compilation paths
           os.makedirs(output_dir, exist_ok=True)
           os.makedirs(f"{output_dir}/recovery/root/vendor/firmware", exist_ok=True)
           os.makedirs(f"{output_dir}/recovery/root/lib/modules", exist_ok=True)
 
-          # Formulate a functional default recovery partition mapping layer 
-          # Modern Oppo GKI configurations handle logical maps dynamically.
           fstab_mock = """# Android fstab file generated dynamically
           /system          ext4    system                                     wait,logical,first_stage_mount
           /vendor          ext4    vendor                                     wait,logical,first_stage_mount
@@ -193,21 +183,27 @@ jobs:
 
       - name: Clone and Sync to Target GitHub Repository
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@://github.com"
           
-          REPO_URL="https://x-access-token:${{ secrets.GH_TOKEN }}@://github.com{{ github.event.inputs.github_username }}/${{ github.event.inputs.target_repo }}.git"
-          echo "[+] Pulling target tree synchronization directory..."
-          git clone $REPO_URL target_repo_dir || mkdir target_repo_dir
+          USER_NAME=$(echo "${{ github.event.inputs.github_username }}" | tr -d '[:space:]')
+          REPO_NAME=$(echo "${{ github.event.inputs.target_repo }}" | tr -d '[:space:]')
+          BRANCH_NAME=$(echo "${{ github.event.inputs.target_branch }}" | tr -d '[:space:]')
           
-          cd target_repo_dir
-          if [ ! -d ".git" ]; then
-            git init
-            git checkout -b ${{ github.event.inputs.target_branch }}
+          # Updated to use the GH_TOKEN environment variable for cloning and pushing
+          REPO_URL="https://x-access-token:${GH_TOKEN}@://github.com{USER_NAME}/${REPO_NAME}.git"
+          echo "[+] Pulling target tree synchronization directory securely..."
+          
+          if git clone "$REPO_URL" target_repo_dir; then
+            cd target_repo_dir
+            git checkout "$BRANCH_NAME" || git checkout -b "$BRANCH_NAME"
           else
-            git checkout ${{ github.event.inputs.target_branch }} || git checkout -b ${{ github.event.inputs.target_branch }}
+            mkdir -p target_repo_dir
+            cd target_repo_dir
+            git init
+            git checkout -b "$BRANCH_NAME"
           fi
           
           mkdir -p device
@@ -217,6 +213,8 @@ jobs:
           if git diff-index --quiet HEAD --; then
             echo "[!] Code trees match perfectly. No updates required."
           else
-            git commit -m "Merged direct-compile AOSP architecture dependencies for ${{ github.event.inputs.device_codename }} [Skip CI]"
-            git push $REPO_URL ${{ github.event.inputs.target_branch }} --force
-            
+            git commit -m "Merged direct-compile AOSP architecture dependencies [Skip CI]"
+            git push "$REPO_URL" "$BRANCH_NAME" --force
+            echo "[+] Successfully synchronized out build dependencies to GitHub repository!"
+          fi
+          
