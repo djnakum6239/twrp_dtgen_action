@@ -1,2 +1,3 @@
 # twrp_dtgen_action
 TWRP Device tree Generator specially made for Oppo, Realme, Oneplus.
+Critical Step Before Running (Authentication)Because this action writes data back into a repository, you must grant the default GITHUB_TOKEN Write Permissions:Go to your GitHub repository Settings -> Actions -> General.Scroll down to Workflow permissions.Toggle the selection to Read and write permissions.Click Save.(Note: If the destination repository belongs to a different user account or organization than where this action runs, you must create a GitHub Personal Access Token (Classic) with repo scopes, add it to your repo's Settings -> Secrets -> Actions as MY_CUSTOM_PAT, and change ${{ secrets.GITHUB_TOKEN }} in the Git push step to ${{ secrets.MY_CUSTOM_PAT }}).
