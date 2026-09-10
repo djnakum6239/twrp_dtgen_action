@@ -1,4 +1,4 @@
-name: TWRP Device Tree Generator & Pusher
+name: Production TWRP Tree Engine & Pusher
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
         default: 'oppo'
         type: string
       device_codename:
-        description: 'Device Codename (e.g., findx6, lemon_p)'
+        description: 'Device Codename (e.g., findx6, cph2523)'
         required: true
         default: 'unknown'
         type: string
@@ -26,7 +26,7 @@ on:
         required: true
         type: string
       target_branch:
-        description: 'Branch to push to (e.g., twrp-12.1, twrp-14)'
+        description: 'Branch to push to (e.g., twrp-14, main)'
         required: true
         default: 'main'
         type: string
@@ -36,175 +36,188 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout Code Generator Repository
-      uses: actions/checkout@v4
+      - name: Checkout Code Generator Repository
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-    - name: Install Dependencies & MagiskBoot
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y wget curl coreutils zip unzip git
-        
-        # Download static compiled magiskboot
-        mkdir -p $HOME/.local/bin
-        curl -sL "https://github.com" -o $HOME/.local/bin/magiskboot
-        chmod +x $HOME/.local/bin/magiskboot
-        echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Install Dependencies & Extraction Utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget curl coreutils zip unzip git cpio
+          mkdir -p $HOME/.local/bin
+          curl -sL "https://github.com" -o $HOME/.local/bin/magiskboot
+          chmod +x $HOME/.local/bin/magiskboot
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-    - name: Download Target Image
-      run: |
-        echo "[+] Downloading image from: ${{ github.event.inputs.image_url }}"
-        curl -L "${{ github.event.inputs.image_url }}" -o target_image.img
-        
-        if [ ! -s target_image.img ]; then
-          echo "[-] Error: Downloaded file is empty or link is invalid."
-          exit 1
-        fi
+      - name: Download Target Image
+        run: |
+          echo "[+] Downloading target partition image from: ${{ github.event.inputs.image_url }}"
+          curl -L "${{ github.event.inputs.image_url }}" -o target_image.img
+          if [ ! -s target_image.img ]; then
+            echo "[-] Error: Downloaded file is empty or link is broken."
+            exit 1
+          fi
 
-    - name: Write Generator Engine Script
-      run: |
-        cat << 'EOF' > generator.py
-        import os
-        import re
-        import subprocess
-        import shutil
-        import sys
+      - name: Execute Framework Generation Pipeline
+        shell: python
+        run: |
+          import os
+          import re
+          import subprocess
+          import shutil
+          import sys
 
-        class TWRPTreeGenerator:
-            def __init__(self, image_path, brand, codename):
-                self.image_path = image_path
-                self.brand = brand.lower()
-                self.codename = codename.lower()
-                self.output_dir = "output_tree"  # Keep flat for direct repo committing
-                self.props = {}
-                
-            def unpack_image(self):
-                print(f"[+] Unpacking {self.image_path} using magiskboot...")
-                if not shutil.which("magiskboot"):
-                    return False
-                
-                os.makedirs("work_dir", exist_ok=True)
-                shutil.copy(self.image_path, "work_dir/boot.img")
-                
-                result = subprocess.run(["magiskboot", "unpack", "boot.img"], cwd="work_dir", capture_output=True, text=True)
-                return os.path.exists("work_dir/header")
+          brand = "${{ github.event.inputs.device_brand }}".lower()
+          codename = "${{ github.event.inputs.device_codename }}".lower()
+          image_path = "target_image.img"
+          output_dir = f"output_tree/device/{brand}/{codename}"
+          props = {'cmdline': "bootdevice=soc/11120000.msdc loop.max_part=7", 'pagesize': "4096"}
 
-            def parse_kernel_info(self):
-                header_file = "work_dir/header"
-                if not os.path.exists(header_file):
-                    self.props['cmdline'] = "bootdevice=soc/11120000.msdc loop.max_part=7"
-                    self.props['pagesize'] = "4096"
-                    return
+          print(f"[+] Extracting {image_path} via magiskboot...")
+          os.makedirs("work_dir", exist_ok=True)
+          shutil.copy(image_path, "work_dir/boot.img")
+          subprocess.run(["magiskboot", "unpack", "boot.img"], cwd="work_dir")
 
-                with open(header_file, "r", errors='ignore') as f:
-                    content = f.read()
-                    
-                cmdline_match = re.search(r'cmdline=(.*)', content)
-                pagesize_match = re.search(r'page_size=(.*)', content)
-                
-                self.props['cmdline'] = cmdline_match.group(1).strip() if cmdline_match else ""
-                self.props['pagesize'] = pagesize_match.group(1).strip() if pagesize_match else "4096"
+          header_file = "work_dir/header"
+          if os.path.exists(header_file):
+              with open(header_file, "r", errors='ignore') as f:
+                  content = f.read()
+              cmdline_match = re.search(r'cmdline=(.*)', content)
+              pagesize_match = re.search(r'page_size=(.*)', content)
+              if cmdline_match: props['cmdline'] = cmdline_match.group(1).strip()
+              if pagesize_match: props['pagesize'] = pagesize_match.group(1).strip()
 
-            def create_structure(self):
-                os.makedirs(self.output_dir, exist_ok=True)
-                os.makedirs(f"{self.output_dir}/recovery/root", exist_ok=True)
+          os.makedirs(output_dir, exist_ok=True)
+          os.makedirs(f"{output_dir}/recovery/root/vendor/firmware", exist_ok=True)
+          os.makedirs(f"{output_dir}/recovery/root/lib/modules", exist_ok=True)
 
-            def write_configs(self):
-                board_content = f"""# Auto-generated TWRP Tree Setup
-DEVICE_PATH := device/{self.brand}/{self.codename}
+          if os.path.exists("work_dir/ramdisk.cpio"):
+              print("[+] Deep unpacking ramdisk filesystem to extract operational driver files...")
+              subprocess.run("magiskboot cpio unpack ramdisk.cpio", shell=True, cwd="work_dir", stdout=subprocess.DEVNULL)
+              for root, dirs, files in os.walk("work_dir"):
+                  for file in files:
+                      if "fstab" in file:
+                          shutil.copy(os.path.join(root, file), f"{output_dir}/recovery.fstab")
+                      if file.endswith(".ko"):
+                          shutil.copy(os.path.join(root, file), f"{output_dir}/recovery/root/lib/modules/{file}")
+                      if file in ["prop.default", "default.prop"]:
+                          shutil.copy(os.path.join(root, file), f"{output_dir}/recovery/root/{file}")
 
-# Architecture Configs
-TARGET_ARCH := arm64
-TARGET_ARCH_VARIANT := armv8-a
-TARGET_CPU_ABI := arm64-v8a
-TARGET_2ND_ARCH := arm
-TARGET_2ND_ARCH_VARIANT := armv7-a-neon
-TARGET_2ND_CPU_ABI := armeabi-v7a
+          if os.path.exists("work_dir/kernel"):
+              shutil.copy("work_dir/kernel", f"{output_dir}/kernel")
+          if os.path.exists("work_dir/dtb"):
+              shutil.copy("work_dir/dtb", f"{output_dir}/dtb")
 
-# Kernel Context (Extracted)
-BOARD_KERNEL_CMDLINE := {self.props.get('cmdline', '')}
-BOARD_KERNEL_PAGESIZE := {self.props.get('pagesize', '4096')}
-BOARD_BOOT_HEADER_VERSION := 4
+          board_content = f"""# Auto-generated TWRP Build Environment Tree
+          DEVICE_PATH := device/{brand}/{codename}
 
-# Recovery Variables
-TW_THEME := portrait_hdpi
-TW_EXTRA_LANGUAGES := true
-TW_INCLUDE_CRYPTO := true
-BOARD_HAS_LARGE_FILESYSTEM := true
-RECOVERY_SDCARD_ON_DATA := true
-TARGET_BOARD_PLATFORM := gki
-"""
-                with open(f"{self.output_dir}/BoardConfig.mk", "w") as f: f.write(board_content)
+          # Architecture Configs
+          TARGET_ARCH := arm64
+          TARGET_ARCH_VARIANT := armv8-a
+          TARGET_CPU_ABI := arm64-v8a
+          TARGET_2ND_ARCH := arm
+          TARGET_2ND_ARCH_VARIANT := armv7-a-neon
+          TARGET_2ND_CPU_ABI := armeabi-v7a
 
-                with open(f"{self.output_dir}/AndroidProducts.mk", "w") as f:
-                    f.write(f"PRODUCT_MAKEFILES := $(LOCAL_DIR)/omni_{self.codename}.mk\n")
+          # Kernel Context Configuration (Parsed from Stock Header)
+          BOARD_KERNEL_CMDLINE := {props.get('cmdline', '')}
+          BOARD_KERNEL_PAGESIZE := {props.get('pagesize', '4096')}
+          BOARD_BOOT_HEADER_VERSION := 4
+          BOARD_HAS_LARGE_FILESYSTEM := true
 
-                omni_content = f"""$(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
-$(call inherit-product, $(SRC_TARGET_DIR)/product/full_base_telephony.mk)
-$(call inherit-product, $(SRC_TARGET_DIR)/product/twres_common.mk)
-$(call inherit-product, device/{self.brand}/{self.codename}/device.mk)
+          # Extracted Prebuilt Binaries Assignments
+          TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/kernel
+          TARGET_PREBUILT_DTB := $(DEVICE_PATH)/dtb
 
-PRODUCT_DEVICE := {self.codename}
-PRODUCT_NAME := omni_{self.codename}
-PRODUCT_BRAND := {self.brand.upper()}
-PRODUCT_MODEL := {self.codename.upper()}
-PRODUCT_MANUFACTURER := {self.brand}
-"""
-                with open(f"{self.output_dir}/omni_{self.codename}.mk", "w") as f: f.write(omni_content)
+          # Dynamic System Linking Flags (Android 13-17 Compilable)
+          TARGET_BOARD_PLATFORM := gki
+          BOARD_USES_RECOVERY_AS_BOOT := true
+          TARGET_NO_RECOVERY := false
+          BOARD_BUILD_SYSTEM_ROOT_IMAGE := false
 
-                with open(f"{self.output_dir}/device.mk", "w") as f:
-                    f.write("$(call inherit-product, $(SRC_TARGET_DIR)/product/virtual_ab_ota.mk)\n")
+          # TWRP Custom Build Engine Switches
+          TW_THEME := portrait_hdpi
+          TW_EXTRA_LANGUAGES := true
+          TW_INCLUDE_CRYPTO := true
+          TW_INCLUDE_FBE := true
+          RECOVERY_SDCARD_ON_DATA := true
+          TW_EXCLUDE_APEX := true
+          TW_INCLUDE_RESETPROP := true
+          TW_INCLUDE_LIBRESETPROP := true
 
-            def generate(self):
-                if self.unpack_image():
-                    self.parse_kernel_info()
-                self.create_structure()
-                self.write_configs()
+          # Load harvested touch / hardware driver components during boot sequence
+          TW_LOAD_VENDOR_MODULES := true
+          """
+          board_content = "\n".join([line.strip() for line in board_content.splitlines() if line.strip()])
+          with open(f"{output_dir}/BoardConfig.mk", "w") as f: f.write(board_content + "\n")
 
-        if __name__ == "__main__":
-            gen = TWRPTreeGenerator("target_image.img", sys.argv[1], sys.argv[2])
-            gen.generate()
-        EOF
+          with open(f"{output_dir}/AndroidProducts.mk", "w") as f:
+              f.write(f"PRODUCT_MAKEFILES := $(LOCAL_DIR)/omni_{codename}.mk\n")
 
-    - name: Run Extraction & Tree Generation
-      run: |
-        python3 generator.py "${{ github.event.inputs.device_brand }}" "${{ github.event.inputs.device_codename }}"
+          blueprint_content = "// Auto-generated build scoping structure\nsoong_namespace {\n}\n"
+          with open(f"{output_dir}/Android.bp", "w") as f: f.write(blueprint_content)
 
-    - name: Clone and Update Device Tree Repository
-      env:
-        # Uses the default GitHub Actions token. For external repos, replace GITHUB_TOKEN with your custom PAT secret if needed.
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
-      run: |
-        # Set up git configurations
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@://github.com"
-        
-        # Clone the empty target repository
-        REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@://github.com{{ github.event.inputs.github_username }}/${{ github.event.inputs.target_repo }}.git"
-        echo "[+] Cloning destination repository..."
-        git clone $REPO_URL target_repo_dir || mkdir target_repo_dir
-        
-        cd target_repo_dir
-        if [ ! -d ".git" ]; then
-          git init
-          git checkout -b ${{ github.event.inputs.target_branch }}
-        else
-          git checkout ${{ github.event.inputs.target_branch }} || git checkout -b ${{ github.event.inputs.target_branch }}
-        fi
-        
-        # Move generated device tree components into the repository folder
-        cp -r ../output_tree/* .
-        
-        # Stage, Commit and Push changes
-        git add .
-        if git diff-index --quiet HEAD --; then
-          echo "[!] No changes detected. Tree is already up-to-date."
-        else
-          git commit -m "Auto-generated TWRP device tree for ${{ github.event.inputs.device_codename }} [Skip CI]"
-          git push $REPO_URL ${{ github.event.inputs.target_branch }} --force
-          echo "[+] Successfully pushed device tree to repository!"
-        fi
+          omni_content = f"""$(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/full_base_telephony.mk)
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/twres_common.mk)
+          $(call inherit-product, device/{brand}/{codename}/device.mk)
+
+          PRODUCT_DEVICE := {codename}
+          PRODUCT_NAME := omni_{codename}
+          PRODUCT_BRAND := {brand.upper()}
+          PRODUCT_MODEL := {codename.upper()}
+          PRODUCT_MANUFACTURER := {brand}
+
+          PRODUCT_RELEASE_NAME := {codename}
+          """
+          omni_content = "\n".join([line.strip() for line in omni_content.splitlines() if line.strip()])
+          with open(f"{output_dir}/omni_{codename}.mk", "w") as f: f.write(omni_content + "\n")
+
+          device_content = """# Enable Virtual A/B properties natively
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/virtual_ab_ota.mk)
+
+          PRODUCT_RECOVERY_DEPENDENCIES += \
+              libcrypto \
+              libresetprop
+
+          PRODUCT_STATIC_BOOT_CONTROL_HAL := true
+          """
+          device_content = "\n".join([line.strip() for line in device_content.splitlines() if line.strip()])
+          with open(f"{output_dir}/device.mk", "w") as f: f.write(device_content + "\n")
+          print("[+] Structural compilation layout ready for AOSP mapping.")
+
+      - name: Clone and Sync to Target GitHub Repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@://github.com"
+          
+          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@://github.com{{ github.event.inputs.github_username }}/${{ github.event.inputs.target_repo }}.git"
+          echo "[+] Pulling target tree synchronization directory..."
+          git clone $REPO_URL target_repo_dir || mkdir target_repo_dir
+          
+          cd target_repo_dir
+          if [ ! -d ".git" ]; then
+            git init
+            git checkout -b ${{ github.event.inputs.target_branch }}
+          else
+            git checkout ${{ github.event.inputs.target_branch }} || git checkout -b ${{ github.event.inputs.target_branch }}
+          fi
+          
+          mkdir -p device
+          cp -r ../output_tree/* .
+          
+          git add .
+          if git diff-index --quiet HEAD --; then
+            echo "[!] Code trees match perfectly. No updates required."
+          else
+            git commit -m "Merged direct-compile AOSP architecture dependencies for ${{ github.event.inputs.device_codename }} [Skip CI]"
+            git push $REPO_URL ${{ github.event.inputs.target_branch }} --force
+            echo "[+] Successfully synchronized out build dependencies to GitHub repository!"
+          fi
+          
